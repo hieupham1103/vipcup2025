@@ -9,13 +9,14 @@ class DetectionModel:
     def __init__(self,
                  model_path: str,
                  conf_threshold: float = 0.25,
-                 iou_threshold: float = 0.45
+                 iou_threshold: float = 0.45,
+                 device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
                 ):
         self.model_path = model_path
         self.conf_threshold = conf_threshold
         self.iou_threshold = iou_threshold
-        
-        self._load_model(self.model_path)
+        self.model = self._load_model(self.model_path)
+        self.device = device
     
     def _load_model(self, model_path):
         self.model = ultralytics.YOLO(model_path)
@@ -27,42 +28,38 @@ class DetectionModel:
             "scores": [],
             "labels": []
         }
-        results = self.model(image,
-                             conf=self.conf_threshold,
-                             iou=self.iou_threshold,
-                             verbose=False,
-                             stream=True
-                             )
-        if results and len(results) > 0:
-            for result in results:
-                if hasattr(result, 'boxes') and len(result.boxes) > 0:
-                    for box in result.boxes:
-                        detections["boxes"].append(box.xyxy.cpu())
-                        detections["scores"].append(box.conf.cpu())
-                        detections["labels"].append(box.cls.cpu())
-        
-        return detections
-
-    def video_detect(self, video_path) -> list:
-        frames = []
-        results = self.model(video_path,
-                             conf=self.conf_threshold,
-                             iou=self.iou_threshold,
-                             verbose=False,
-                             stream=True
+        results = self.model.predict(image,
+                                conf=self.conf_threshold,
+                                iou=self.iou_threshold,
+                                verbose=False,
+                                stream=True,
+                                device=self.device
                              )
         for result in results:
-            frame_detections = {
-                "boxes": [],
-                "scores": [],
-                "labels": []
-            }
             for box in result.boxes:
-                frame_detections["boxes"].append(box.xyxy.cpu())
-                frame_detections["scores"].append(box.conf.cpu())
-                frame_detections["labels"].append(box.cls.cpu())
-            frames.append(frame_detections)
-
+                detections["boxes"].append(box.xyxy.cpu()[0])
+                detections["scores"].append(box.conf.cpu()[0])
+                detections["labels"].append(box.cls.cpu()[0])
+            # break
+            
+        return detections
+    
+    def video_detect(self, video_path) -> list:
+        frames = []
+        
+        cap = cv2.VideoCapture(video_path)
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            det = self.image_detect(frame)
+            
+            frames.append(det)
+            # if len(frames) >= 30:
+            #     break
+            
+        cap.release()
         return frames
     
 class TrackingModel:

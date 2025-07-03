@@ -1,7 +1,6 @@
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
-from model import DetectionModel, TrackingModel
 
 def visualize_detection_video(
         video_path: str,
@@ -23,7 +22,7 @@ def visualize_detection_video(
         if frame_index < len(detection_frames):
             detections = detection_frames[frame_index]
             for box, score, label in zip(detections["boxes"], detections["scores"], detections["labels"]):
-                box = box[0].tolist()
+                box = box.tolist()
                 label = int(label.item())
                 score = score.item()
                 # print(label)
