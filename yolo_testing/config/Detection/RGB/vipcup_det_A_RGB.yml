@@ -1,0 +1,7 @@
+path: /home/cvpr2025/yolo_testing/data/det/split_A/RGB
+train: /home/cvpr2025/yolo_testing/config/Detection/RGB/train.txt
+val:   /home/cvpr2025/yolo_testing/config/Detection/RGB/val.txt
+test:  /home/cvpr2025/yolo_testing/config/Detection/RGB/test.txt
+
+nc: 2
+names: ['BIRD', 'DRONE']

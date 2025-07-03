@@ -1,0 +1,48 @@
+==================================================
+DETECTION EVALUATION REPORT
+==================================================
+IoU Threshold: 0.1
+Detection Threshold: 0.5
+Min Box Area: 1
+--------------------------------------------------
+OVERALL RESULTS:
+Precision: 0.8703
+Recall: 0.7450
+F1-Score: 0.8028
+True Positives: 2644
+False Positives: 394
+False Negatives: 905
+--------------------------------------------------
+PER-VIDEO RESULTS:
+
+Video: video_0
+  Precision: 0.8479
+  Recall: 0.6877
+  F1-Score: 0.7595
+  True Positives: 903
+  False Positives: 162
+  False Negatives: 410
+
+Video: video_1
+  Precision: 0.9611
+  Recall: 0.8500
+  F1-Score: 0.9021
+  True Positives: 765
+  False Positives: 31
+  False Negatives: 135
+
+Video: video_2
+  Precision: 0.9223
+  Recall: 0.6989
+  F1-Score: 0.7952
+  True Positives: 629
+  False Positives: 53
+  False Negatives: 271
+
+Video: video_3
+  Precision: 0.7010
+  Recall: 0.7959
+  F1-Score: 0.7454
+  True Positives: 347
+  False Positives: 148
+  False Negatives: 89

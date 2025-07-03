@@ -1,0 +1,7 @@
+python train.py --data_split A --device cuda:0
+
+python inference.py --input /path/to/video.mp4 --output output/results.mp4
+
+python -m utils.bgsub -i /path/to/video.mp4 -o output/bgsub_result.mp4
+
+python -m utils.visualize --input /path/to/video.mp4 --bgsub /path/to/bgsub.mp4 --det /path/to/det.mp4 --output output/combined.mp4
