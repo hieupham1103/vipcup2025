@@ -142,51 +142,40 @@ class DetectionModel(BaseDetectionModel):
             boxes_list = [det['boxes'] for det in detections_per_view]
             scores_list = [det['scores'] for det in detections_per_view]
             labels_list = [det['labels'] for det in detections_per_view]
-            # Apply Non-Maximum Weighted
-            print("Applying Non-Maximum Weighted fusion...")
-            print(f"Boxes:")
-            for boxes in boxes_list:
-                print(boxes)
-            print(f"Scores:")
-            for scores in scores_list:
-                print(scores)
-            print(f"Labels:")
-            for labels in labels_list:
-                print(labels)
-                
+
+            # Apply Weighted Boxes Fusion
             final_boxes, final_scores, final_labels = weighted_boxes_fusion(
-                boxes_list, 
-                scores_list, 
-                labels_list, 
-                weights=total_weights, 
+                boxes_list,
+                scores_list,
+                labels_list,
+                weights=total_weights,
                 iou_thr=self.iou_threshold,
                 skip_box_thr=self.conf_threshold
             )
-            if len(final_boxes) > 1:
-                print(f"===================== Final Detections, iou threshold: {self.iou_threshold} ====================")
-                for i in range(len(final_boxes)):
-                    box = final_boxes[i]
-                    print(f"Box {i}: {box}, Score: {final_scores[i]}, Label: {final_labels[i]}")
-                for i in range(len(final_boxes)):
-                    for j in range(i + 1, len(final_boxes)):
-                        iou = self.bb_intersection_over_union(final_boxes[i], final_boxes[j])
-                        print(f"IoU between box {i} and box {j}: {iou:.4f}")
-                        
-            # Convert back to pixel coordinates
-            for i in range(len(final_boxes)):
-                box = final_boxes[i]
-                pixel_box = [
-                    box[0] * w,  # x1
-                    box[1] * h,  # y1
-                    box[2] * w,  # x2
-                    box[3] * h   # y2
-                ]
-                
-                detections["boxes"].append(pixel_box)
-                detections["scores"].append(final_scores[i])
-                detections["labels"].append(final_labels[i])
-        
+
+            # ----- apply standard NMS to remove high-overlap duplicates -----
+            if len(final_boxes) > 0:
+                boxes_tensor = torch.tensor(final_boxes, dtype=torch.float32)
+                scores_tensor = torch.tensor(final_scores, dtype=torch.float32)
+                keep_indices = torch_nms(boxes_tensor, scores_tensor, self.iou_threshold)
+
+                final_boxes = [final_boxes[i] for i in keep_indices]
+                final_scores = [final_scores[i] for i in keep_indices]
+                final_labels = [final_labels[i] for i in keep_indices]
+            # ----------------------------------------------------------------------
+
+            # Convert normalized boxes back to pixel coords
+            for box, score, label in zip(final_boxes, final_scores, final_labels):
+                x1 = box[0] * w
+                y1 = box[1] * h
+                x2 = box[2] * w
+                y2 = box[3] * h
+                detections["boxes"].append([x1, y1, x2, y2])
+                detections["scores"].append(score)
+                detections["labels"].append(label)
+
         return detections
+
     
     def bb_intersection_over_union(self, boxA, boxB):
         xA = max(boxA[0], boxB[0])
