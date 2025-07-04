@@ -35,28 +35,27 @@ class DetectionModel(BaseDetectionModel):
         h, w = image.shape[:2]
         
         scales = [1.0]
-        crop_ratio = 0.6
+        crop_ratio = 0.65
         
         batch_images = []
         batch_metadata = []
-        
+        total_weights = []
         for scale in scales:
             new_h, new_w = int(h * scale), int(w * scale)
             scaled_image = cv2.resize(image, (new_w, new_h))
             
             # ảnh gốc
-            # batch_images.append(scaled_image)
-            # batch_metadata.append({
-            #     'scale': scale,
-            #     'crop_size': (new_w, new_h),
-            #     'offset': (0, 0),
-            #     'weight': 2.0 if scale == 1.0 else 1.0,
-            #     'original_size': (w, h)
-            # })
+            batch_images.append(scaled_image)
+            batch_metadata.append({
+                'scale': scale,
+                'crop_size': (new_w, new_h),
+                'offset': (0, 0),
+                'original_size': (w, h)
+            })
             
             crop_w = int(new_w * crop_ratio)
             crop_h = int(new_h * crop_ratio)
-            
+                
             crop_positions = [
                 (0, 0),
                 (new_w - crop_w, 0),
@@ -65,28 +64,20 @@ class DetectionModel(BaseDetectionModel):
                 ((new_w - crop_w) // 2, (new_h - crop_h) // 2)
             ]
             
-            weights = [
-                1.0,
-                1.0,
-                1.0,
-                1.0,
-                2.0
-            ]
             
             # print(f"Processing scale: {scale}, new size: ({new_w}, {new_h})")
             # print(f"Crop size: ({crop_w}, {crop_h}), positions: {crop_positions}")
             
-            for weight, (x_offset, y_offset) in zip(weights, crop_positions):
+            for idx, (x_offset, y_offset) in enumerate(crop_positions):
                 crop = scaled_image[y_offset:y_offset + crop_h, x_offset:x_offset + crop_w]
                 batch_images.append(crop)
                 batch_metadata.append({
                     'scale': scale,
                     'crop_size': (crop_w, crop_h),
                     'offset': (x_offset, y_offset),
-                    'weight': weight,
                     'original_size': (w, h)
                 })
-        
+                
         # 3. Run batch inference
         batch_results = self.model.predict(
             batch_images,
@@ -97,9 +88,22 @@ class DetectionModel(BaseDetectionModel):
             stream=True,
         )
         
-        all_detections = []
+        weights = [
+            0.5,
+            1.0,  # top-left
+            1.0,  # top-right
+            1.0,  # bottom-left
+            1.0,  # bottom-right
+            2.0   # center
+        ]
+        detections_per_view = []
         
-        for i, (result, metadata) in enumerate(zip(batch_results, batch_metadata)):
+        for idx, (result, metadata) in enumerate(zip(batch_results, batch_metadata)):
+            # print(f"Processing result {idx + 1}/{len(batch_metadata)}")
+            # if result.boxes is None:
+            #     print("0 boxes detected, skipping...")
+            # else:
+            #     print(f"Detected {len(result.boxes)} boxes")
             if result.boxes is None or len(result.boxes) == 0:
                 continue
                 
@@ -124,31 +128,51 @@ class DetectionModel(BaseDetectionModel):
             boxes = np.clip(boxes, 0, 1)
             
             if len(boxes) > 0:
-                all_detections.append({
+                detections_per_view.append({
                     'boxes': boxes.tolist(),
                     'scores': scores.tolist(),
-                    'labels': labels.tolist(),
-                    'weight': metadata['weight']
+                    'labels': labels.tolist()
                 })
-        
+                
+                total_weights.append(weights[idx])
+            # print(f"View {idx + 1}/{len(batch_metadata)}: Detected {len(boxes)} boxes with weight {weights[idx]}")
+
         # 5. Apply Non-Maximum Weighted fusion
-        if all_detections:
-            boxes_list = [det['boxes'] for det in all_detections]
-            scores_list = [det['scores'] for det in all_detections]
-            labels_list = [det['labels'] for det in all_detections]
-            weights = [det['weight'] for det in all_detections]
-            
+        if detections_per_view:
+            boxes_list = [det['boxes'] for det in detections_per_view]
+            scores_list = [det['scores'] for det in detections_per_view]
+            labels_list = [det['labels'] for det in detections_per_view]
             # Apply Non-Maximum Weighted
-            final_boxes, final_scores, final_labels = non_maximum_weighted(
+            print("Applying Non-Maximum Weighted fusion...")
+            print(f"Boxes:")
+            for boxes in boxes_list:
+                print(boxes)
+            print(f"Scores:")
+            for scores in scores_list:
+                print(scores)
+            print(f"Labels:")
+            for labels in labels_list:
+                print(labels)
+                
+            final_boxes, final_scores, final_labels = weighted_boxes_fusion(
                 boxes_list, 
                 scores_list, 
                 labels_list, 
-                weights=weights, 
+                weights=total_weights, 
                 iou_thr=self.iou_threshold,
-                skip_box_thr=0.01
+                skip_box_thr=self.conf_threshold
             )
-            
-            # Convert back to pixel coordinates and tensor format
+            if len(final_boxes) > 1:
+                print(f"===================== Final Detections, iou threshold: {self.iou_threshold} ====================")
+                for i in range(len(final_boxes)):
+                    box = final_boxes[i]
+                    print(f"Box {i}: {box}, Score: {final_scores[i]}, Label: {final_labels[i]}")
+                for i in range(len(final_boxes)):
+                    for j in range(i + 1, len(final_boxes)):
+                        iou = self.bb_intersection_over_union(final_boxes[i], final_boxes[j])
+                        print(f"IoU between box {i} and box {j}: {iou:.4f}")
+                        
+            # Convert back to pixel coordinates
             for i in range(len(final_boxes)):
                 box = final_boxes[i]
                 pixel_box = [
@@ -158,11 +182,22 @@ class DetectionModel(BaseDetectionModel):
                     box[3] * h   # y2
                 ]
                 
-                detections["boxes"].append(torch.tensor(pixel_box))
-                detections["scores"].append(torch.tensor(final_scores[i]))
-                detections["labels"].append(torch.tensor(final_labels[i]))
+                detections["boxes"].append(pixel_box)
+                detections["scores"].append(final_scores[i])
+                detections["labels"].append(final_labels[i])
         
         return detections
+    
+    def bb_intersection_over_union(self, boxA, boxB):
+        xA = max(boxA[0], boxB[0])
+        yA = max(boxA[1], boxB[1])
+        xB = min(boxA[2], boxB[2])
+        yB = min(boxA[3], boxB[3])
+        interArea = max(0, xB - xA + 1) * max(0, yB - yA + 1)
+        boxAArea = (boxA[2] - boxA[0] + 1) * (boxA[3] - boxA[1] + 1)
+        boxBArea = (boxB[2] - boxB[0] + 1) * (boxB[3] - boxB[1] + 1)
+        iou = interArea / float(boxAArea + boxBArea - interArea)
+        return iou
 
     
 class TrackingModel:
