@@ -34,7 +34,7 @@ class DetectionModel(BaseDetectionModel):
         
         h, w = image.shape[:2]
         
-        scales = [0.8, 1.0, 1.2]
+        scales = [1.0]
         crop_ratio = 0.6
         
         batch_images = []
@@ -44,14 +44,15 @@ class DetectionModel(BaseDetectionModel):
             new_h, new_w = int(h * scale), int(w * scale)
             scaled_image = cv2.resize(image, (new_w, new_h))
             
-            batch_images.append(scaled_image)
-            batch_metadata.append({
-                'scale': scale,
-                'crop_size': (new_w, new_h),
-                'offset': (0, 0),
-                'weight': 2.0 if scale == 1.0 else 1.0,
-                'original_size': (w, h)
-            })
+            # ảnh gốc
+            # batch_images.append(scaled_image)
+            # batch_metadata.append({
+            #     'scale': scale,
+            #     'crop_size': (new_w, new_h),
+            #     'offset': (0, 0),
+            #     'weight': 2.0 if scale == 1.0 else 1.0,
+            #     'original_size': (w, h)
+            # })
             
             crop_w = int(new_w * crop_ratio)
             crop_h = int(new_h * crop_ratio)
@@ -64,19 +65,29 @@ class DetectionModel(BaseDetectionModel):
                 ((new_w - crop_w) // 2, (new_h - crop_h) // 2)
             ]
             
-            for x_offset, y_offset in crop_positions:
+            weights = [
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                2.0
+            ]
+            
+            # print(f"Processing scale: {scale}, new size: ({new_w}, {new_h})")
+            # print(f"Crop size: ({crop_w}, {crop_h}), positions: {crop_positions}")
+            
+            for weight, (x_offset, y_offset) in zip(weights, crop_positions):
                 crop = scaled_image[y_offset:y_offset + crop_h, x_offset:x_offset + crop_w]
                 batch_images.append(crop)
                 batch_metadata.append({
                     'scale': scale,
                     'crop_size': (crop_w, crop_h),
                     'offset': (x_offset, y_offset),
-                    'weight': 1.8 if scale == 1.0 else 1.2,
+                    'weight': weight,
                     'original_size': (w, h)
                 })
         
         # 3. Run batch inference
-        print(f"Processing batch of {len(batch_images)} images ({len(scales)} scales × 6 images each)...")
         batch_results = self.model.predict(
             batch_images,
             conf=self.conf_threshold,
@@ -96,7 +107,6 @@ class DetectionModel(BaseDetectionModel):
             scores = result.boxes.conf.cpu().numpy()
             labels = result.boxes.cls.cpu().numpy()
             
-            # UNIFIED coordinate conversion
             scale = metadata['scale']
             x_offset, y_offset = metadata['offset']
             w_orig, h_orig = metadata['original_size']
