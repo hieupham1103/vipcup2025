@@ -4,6 +4,7 @@ import ultralytics
 from ultralytics.trackers.byte_tracker import BYTETracker
 from ultralytics.cfg import get_cfg
 import torch
+from torchvision.ops import nms as torch_nms
 from ensemble_boxes import *
 from .model import DetectionModel as BaseDetectionModel
 
