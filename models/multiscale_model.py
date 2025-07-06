@@ -83,14 +83,14 @@ class DetectionModel(BaseDetectionModel):
         batch_results = self.model.predict(
             batch_images,
             conf=self.conf_threshold,
-            iou=0.01,
+            iou=self.iou_threshold,
             verbose=False,
             device=self.device,
             stream=True,
         )
         
         weights = [
-            0.5,
+            0.75,  # original image
             1.0,  # top-left
             1.0,  # top-right
             1.0,  # bottom-left
@@ -145,7 +145,7 @@ class DetectionModel(BaseDetectionModel):
             labels_list = [det['labels'] for det in detections_per_view]
 
             # Apply Weighted Boxes Fusion
-            final_boxes, final_scores, final_labels = weighted_boxes_fusion(
+            wbf_boxes, wbf_scores, wbf_labels = weighted_boxes_fusion(
                 boxes_list,
                 scores_list,
                 labels_list,
@@ -153,19 +153,48 @@ class DetectionModel(BaseDetectionModel):
                 iou_thr=self.iou_threshold,
                 skip_box_thr=self.conf_threshold
             )
+            #filter out boxes with low scores
+            wbf_keep = wbf_scores > self.conf_threshold
+            # wbf_boxes = wbf_boxes.tolist()
+            # wbf_scores = wbf_scores.tolist()
+            # wbf_labels = wbf_labels.tolist()
+            final_boxes = wbf_boxes[wbf_keep]
+            final_scores = wbf_scores[wbf_keep]
+            final_labels = wbf_labels[wbf_keep]
 
-            # ----- apply standard NMS to remove high-overlap duplicates -----
-            if len(final_boxes) > 0:
-                boxes_tensor = torch.tensor(final_boxes, dtype=torch.float32)
-                scores_tensor = torch.tensor(final_scores, dtype=torch.float32)
-                keep_indices = torch_nms(boxes_tensor, scores_tensor, self.iou_threshold)
+            nms_keep_indices = torch_nms(
+                torch.tensor(final_boxes),
+                torch.tensor(final_scores),
+                self.iou_threshold
+            )
+            final_boxes = [final_boxes[i] for i in nms_keep_indices]
+            final_scores = [final_scores[i] for i in nms_keep_indices]
+            final_labels = [final_labels[i] for i in nms_keep_indices]
+            
+            # if len(final_labels) > 1:
+            #     print("======= Results =======")
+            #     print(f"Before WBF: {len(boxes_list)} views")
+            #     for i, boxes in enumerate(boxes_list):
+            #         print(f"View {i + 1}: {len(boxes)} boxes")
+            #         print(boxes)
+            #         print(scores_list[i])
+            #         print(labels_list[i])
+            #     print(f"After WBF: {len(wbf_boxes)} boxes")
+            #     print(wbf_boxes)
+            #     print(wbf_scores)
+            #     print(wbf_labels)
+            #     print(wbf_keep)
+            #     print(nms_keep_indices)
+            #     print(f"After NMS: {len(final_boxes)} boxes")
+            #     print(final_boxes)
+            #     print(final_scores)
+            #     print(final_labels)
+            #     for i, box in enumerate(final_boxes):
+            #         for j, box2 in enumerate(final_boxes):
+            #             if i < j:
+            #                 iou = self.bb_intersection_over_union(box, box2)
+            #                 print(f"Box {i} and Box {j} have IoU {iou:.2f}")
 
-                final_boxes = [final_boxes[i] for i in keep_indices]
-                final_scores = [final_scores[i] for i in keep_indices]
-                final_labels = [final_labels[i] for i in keep_indices]
-            # ----------------------------------------------------------------------
-
-            # Convert normalized boxes back to pixel coords
             for box, score, label in zip(final_boxes, final_scores, final_labels):
                 x1 = box[0] * w
                 y1 = box[1] * h
@@ -188,53 +217,3 @@ class DetectionModel(BaseDetectionModel):
         boxBArea = (boxB[2] - boxB[0] + 1) * (boxB[3] - boxB[1] + 1)
         iou = interArea / float(boxAArea + boxBArea - interArea)
         return iou
-
-    
-class TrackingModel:
-    def __init__(self,
-                 detection_model: DetectionModel,
-                 config_path='configs/bytetrack.yml',
-                 fps = 25
-                 ):
-        self.det_model = detection_model
-        
-        self.tracker = BYTETracker(
-                            args=get_cfg(config_path),
-                            frame_rate=fps
-                            )
-    
-    def video_track(self, video_path: str) -> list:
-        cap = cv2.VideoCapture(video_path)
-        tracked_frames = []
-
-        if not cap.isOpened():
-            raise IOError(f"Cannot open video file {video_path}")
-
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-
-            det = self.det_model.image_detect(frame)
-            
-            boxes = np.array(det["boxes"]) if det["boxes"] else np.zeros((0, 4))
-            scores = np.array(det["scores"]) if det["scores"] else np.zeros((0,))
-            labels = np.array(det["labels"]) if det["labels"] else np.zeros((0,), dtype=int)
-
-            dets = np.concatenate([boxes, scores.reshape(-1, 1)], axis=1) if boxes.size else np.zeros((0, 5))
-
-            online_targets = self.tracker.update(dets, [frame.shape[0], frame.shape[1]])
-
-            tracks = []
-            for t in online_targets:
-                x1, y1, x2, y2, track_id = t[:5]
-                tracks.append([int(x1), int(y1), int(x2), int(y2), int(track_id)])
-
-            tracked_frames.append({
-                "frame": frame,
-                "tracks": tracks,
-                
-            })
-
-        cap.release()
-        return tracked_frames
