@@ -26,7 +26,27 @@ class DetectionModel(BaseDetectionModel):
         self.model = ultralytics.YOLO(model_path)
         return self.model
     
-    def image_detect(self, image):
+    def image_detect(self,
+                     image,
+                     scales=[1.0],
+                     crop_ratio=0.65,
+                     weights = [
+                            0.75,  # original image
+                            1.0,  # top-left
+                            1.0,  # top-right
+                            1.0,  # bottom-left
+                            1.0,  # bottom-right
+                            2.0   # center
+                        ]
+                    ,
+                    conf_threshold=None,
+                    iou_threshold=None
+                     ):
+        if conf_threshold is not None:
+            conf_threshold = self.conf_threshold
+        if iou_threshold is not None:
+            iou_threshold = self.iou_threshold
+            
         detections = {
             "boxes": [],
             "scores": [],
@@ -34,9 +54,6 @@ class DetectionModel(BaseDetectionModel):
         }
         
         h, w = image.shape[:2]
-        
-        scales = [1.0]
-        crop_ratio = 0.65
         
         batch_images = []
         batch_metadata = []
@@ -82,21 +99,14 @@ class DetectionModel(BaseDetectionModel):
         # 3. Run batch inference
         batch_results = self.model.predict(
             batch_images,
-            conf=self.conf_threshold,
-            iou=self.iou_threshold,
+            conf=conf_threshold,
+            iou=iou_threshold,
             verbose=False,
             device=self.device,
             stream=True,
         )
         
-        weights = [
-            0.75,  # original image
-            1.0,  # top-left
-            1.0,  # top-right
-            1.0,  # bottom-left
-            1.0,  # bottom-right
-            2.0   # center
-        ]
+        
         detections_per_view = []
         
         for idx, (result, metadata) in enumerate(zip(batch_results, batch_metadata)):
@@ -150,11 +160,11 @@ class DetectionModel(BaseDetectionModel):
                 scores_list,
                 labels_list,
                 weights=total_weights,
-                iou_thr=self.iou_threshold,
-                skip_box_thr=self.conf_threshold
+                iou_thr=iou_threshold,
+                skip_box_thr=conf_threshold
             )
             #filter out boxes with low scores
-            wbf_keep = wbf_scores > self.conf_threshold
+            wbf_keep = wbf_scores > conf_threshold
             # wbf_boxes = wbf_boxes.tolist()
             # wbf_scores = wbf_scores.tolist()
             # wbf_labels = wbf_labels.tolist()
@@ -165,7 +175,7 @@ class DetectionModel(BaseDetectionModel):
             nms_keep_indices = torch_nms(
                 torch.tensor(final_boxes),
                 torch.tensor(final_scores),
-                self.iou_threshold
+                iou_threshold
             )
             final_boxes = [final_boxes[i] for i in nms_keep_indices]
             final_scores = [final_scores[i] for i in nms_keep_indices]
@@ -205,6 +215,51 @@ class DetectionModel(BaseDetectionModel):
                 detections["labels"].append(label)
 
         return detections
+    
+    def video_detect(self,
+                    video_path,
+                    scales=[1.0],
+                    crop_ratio=0.65,
+                    weights = [
+                            0.75,  # original image
+                            1.0,  # top-left
+                            1.0,  # top-right
+                            1.0,  # bottom-left
+                            1.0,  # bottom-right
+                            2.0   # center
+                        ]
+                    ,
+                    conf_threshold=None,
+                    iou_threshold=None
+                     
+                     ) -> list:
+        if conf_threshold is None:
+            conf_threshold = self.conf_threshold
+        if iou_threshold is None:
+            iou_threshold = self.iou_threshold
+            
+        frames = []
+        
+        cap = cv2.VideoCapture(video_path)
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            det = self.image_detect(frame,
+                                    scales=scales,
+                                    crop_ratio=crop_ratio,
+                                    weights=weights,
+                                    conf_threshold=conf_threshold,
+                                    iou_threshold=iou_threshold
+                                )
+            
+            frames.append(det)
+            # if len(frames) >= 30:
+            #     break
+            
+        cap.release()
+        return frames
 
     
     def bb_intersection_over_union(self, boxA, boxB):

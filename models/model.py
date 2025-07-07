@@ -22,15 +22,24 @@ class DetectionModel:
         self.model = ultralytics.YOLO(model_path)
         return self.model
     
-    def image_detect(self, image):
+    def image_detect(self,
+                    image,
+                    conf_threshold=None,
+                    iou_threshold=None
+                ):
+        if conf_threshold is not None:
+            conf_threshold = self.conf_threshold
+        if iou_threshold is not None:
+            iou_threshold = self.iou_threshold
+            
         detections = {
             "boxes": [],
             "scores": [],
             "labels": []
         }
         results = self.model.predict(image,
-                                conf=self.conf_threshold,
-                                iou=self.iou_threshold,
+                                conf=conf_threshold,
+                                iou=iou_threshold,
                                 verbose=False,
                                 stream=True,
                                 device=self.device
@@ -44,7 +53,12 @@ class DetectionModel:
             
         return detections
     
-    def video_detect(self, video_path) -> list:
+    def video_detect(self,
+                    video_path,
+                    conf_threshold=None,
+                    iou_threshold=None
+                     
+                     ) -> list:
         frames = []
         
         cap = cv2.VideoCapture(video_path)
@@ -53,7 +67,10 @@ class DetectionModel:
             if not ret:
                 break
             
-            det = self.image_detect(frame)
+            det = self.image_detect(frame, 
+                                    conf_threshold=conf_threshold, 
+                                    iou_threshold=iou_threshold
+                                    )
             
             frames.append(det)
             # if len(frames) >= 30:
