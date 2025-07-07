@@ -42,11 +42,11 @@ class DetectionModel(BaseDetectionModel):
                     conf_threshold=None,
                     iou_threshold=None
                      ):
-        if conf_threshold is not None:
+        if conf_threshold is None:
             conf_threshold = self.conf_threshold
-        if iou_threshold is not None:
+        if iou_threshold is None:
             iou_threshold = self.iou_threshold
-            
+        # print(f"Running detection on image with conf: {conf_threshold}, iou: {iou_threshold}")
         detections = {
             "boxes": [],
             "scores": [],
