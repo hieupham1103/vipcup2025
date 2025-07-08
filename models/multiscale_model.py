@@ -246,7 +246,7 @@ class DetectionModel(BaseDetectionModel):
         final_frames = []
         
         for idx, frame in enumerate(frames):
-            print(f"Processing frame {idx + 1}/{len(frames)}")
+            # print(f"Processing frame {idx + 1}/{len(frames)}")
             
             # Apply interpolation postprocessing
             interpolated_frame = self.interpolate_frame(
@@ -301,7 +301,7 @@ class DetectionModel(BaseDetectionModel):
             del interpolated_frame["boxes"][obj_idx]
             del interpolated_frame["scores"][obj_idx]
             del interpolated_frame["labels"][obj_idx]
-            print(f"  -> Removed isolated object: label {removed_label}, score {removed_score:.3f}")
+            # print(f"  -> Removed isolated object: label {removed_label}, score {removed_score:.3f}")
         
         # 2. Find missing objects (appear in before AND after frames but not in current)
         missing_objects = self.find_missing_objects(
@@ -318,7 +318,7 @@ class DetectionModel(BaseDetectionModel):
             interpolated_frame["boxes"].append(missing_obj["box"])
             interpolated_frame["scores"].append(missing_obj["score"])
             interpolated_frame["labels"].append(missing_obj["label"])
-            print(f"  -> Added missing object: label {missing_obj['label']}, score {missing_obj['score']:.3f}")
+            # print(f"  -> Added missing object: label {missing_obj['label']}, score {missing_obj['score']:.3f}")
         
         # 5. Apply label corrections (after removal, so indices might have changed)
         for correction in label_corrections:
@@ -328,7 +328,7 @@ class DetectionModel(BaseDetectionModel):
                 new_label = correction["new_label"]
                 old_label = interpolated_frame["labels"][box_idx]
                 interpolated_frame["labels"][box_idx] = new_label
-                print(f"  -> Corrected label: {old_label} → {new_label}")
+                # print(f"  -> Corrected label: {old_label} → {new_label}")
         
         return interpolated_frame
 
