@@ -13,8 +13,8 @@ from collections import Counter
 class DetectionModel(BaseDetectionModel):
     def __init__(self,
                  model_path: str,
-                 conf_threshold: float = 0.25,
-                 iou_threshold: float = 0.45,
+                 conf_threshold: float = 0.3,
+                 iou_threshold: float = 0.1,
                  device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
                 ):
         self.model_path = model_path
