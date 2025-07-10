@@ -5,8 +5,60 @@ import torch
 from torchvision.ops import nms as torch_nms
 from ensemble_boxes import *
 from .model import DetectionModel as BaseDetectionModel
-from collections import Counter
+from collections import Counter, defaultdict
 
+
+class KalmanFilter:
+    def __init__(self, dt=1.0):
+        self.dt = dt
+        self.kf = cv2.KalmanFilter(8, 4)
+        
+        # State transition matrix (position and velocity for x, y, w, h)
+        self.kf.transitionMatrix = np.array([
+            [1, 0, 0, 0, dt, 0, 0, 0],
+            [0, 1, 0, 0, 0, dt, 0, 0],
+            [0, 0, 1, 0, 0, 0, dt, 0],
+            [0, 0, 0, 1, 0, 0, 0, dt],
+            [0, 0, 0, 0, 1, 0, 0, 0],
+            [0, 0, 0, 0, 0, 1, 0, 0],
+            [0, 0, 0, 0, 0, 0, 1, 0],
+            [0, 0, 0, 0, 0, 0, 0, 1]
+        ], dtype=np.float32)
+        
+        # Measurement matrix (we observe position and size)
+        self.kf.measurementMatrix = np.array([
+            [1, 0, 0, 0, 0, 0, 0, 0],
+            [0, 1, 0, 0, 0, 0, 0, 0],
+            [0, 0, 1, 0, 0, 0, 0, 0],
+            [0, 0, 0, 1, 0, 0, 0, 0]
+        ], dtype=np.float32)
+        
+        # Process noise covariance
+        self.kf.processNoiseCov = np.eye(8, dtype=np.float32) * 0.1
+        
+        # Measurement noise covariance
+        self.kf.measurementNoiseCov = np.eye(4, dtype=np.float32) * 1.0
+        
+        # Error covariance
+        self.kf.errorCovPost = np.eye(8, dtype=np.float32)
+        
+    def init_state(self, bbox):
+        """Initialize Kalman filter with first detection"""
+        x, y, w, h = bbox[0], bbox[1], bbox[2] - bbox[0], bbox[3] - bbox[1]
+        self.kf.statePre = np.array([x, y, w, h, 0, 0, 0, 0], dtype=np.float32)
+        self.kf.statePost = self.kf.statePre.copy()
+        
+    def predict(self):
+        """Predict next state"""
+        prediction = self.kf.predict()
+        x, y, w, h = prediction[0], prediction[1], prediction[2], prediction[3]
+        return [x, y, x + w, y + h]
+        
+    def update(self, bbox):
+        """Update with new measurement"""
+        x, y, w, h = bbox[0], bbox[1], bbox[2] - bbox[0], bbox[3] - bbox[1]
+        measurement = np.array([x, y, w, h], dtype=np.float32)
+        self.kf.correct(measurement)
 
 class DetectionModel(BaseDetectionModel):
     def __init__(self,
@@ -238,8 +290,9 @@ class DetectionModel(BaseDetectionModel):
                     ,
                     conf_threshold=None,
                     iou_threshold=None,
-                    video_buffer_size=2
-                     ) -> list:
+                    min_detection_frames=4,
+                    max_missing_frames=5
+                ) -> list:
         if conf_threshold is None:
             conf_threshold = self.conf_threshold
         if iou_threshold is None:
@@ -283,314 +336,155 @@ class DetectionModel(BaseDetectionModel):
             cap_2.release()
         else:
             raise ValueError("video_path must be a string or a list of strings")
-        before_frame = []
-        after_frame = []
-        if len(frames) > video_buffer_size:
-            after_frame = frames[1:video_buffer_size + 1]
-        else:
-            after_frame = frames[1:]
         
-        # final_frames = []
-        
-        # for idx, frame in enumerate(frames):
-        #     print(f"Processing frame {idx + 1}/{len(frames)}")
-            
-        #     # Apply interpolation postprocessing
-        #     interpolated_frame = self.interpolate_frame(
-        #         current_frame=frame,
-        #         before_frames=before_frame.copy(),
-        #         after_frames=after_frame.copy(),
-        #         iou_threshold=self.iou_threshold
-        #     )
-            
-        #     final_frames.append(interpolated_frame)
-                          
-        #     # Update before_frame and after_frame buffers
-        #     if len(before_frame) >= video_buffer_size:
-        #         before_frame.pop(0)
-        #     if len(after_frame) >= video_buffer_size:
-        #         after_frame.pop(0)
-        #     before_frame.append(frame)
-        #     if idx + video_buffer_size < len(frames):
-        #         after_frame.append(frames[idx + video_buffer_size])
-        
-        return frames
+        # final_frames = frames
+        final_frames = self._postprocess_frames(frames, min_detection_frames, max_missing_frames, iou_threshold)
 
-    def interpolate_frame(self, current_frame, before_frames, after_frames, iou_threshold=0.5):
-        """
-        Apply temporal interpolation to current frame based on before and after frames
+        return final_frames
+    
+    def _postprocess_frames(self, frames, min_detection_frames, max_missing_frames, iou_threshold):
+        """Apply post-processing with Kalman filter, label correction, and spurious detection removal"""
         
-        Args:
-            current_frame: Current frame detections
-            before_frames: List of previous frame detections
-            after_frames: List of future frame detections
-            iou_threshold: IoU threshold for matching objects
+        # Track storage
+        tracks = {}  # track_id: {'kalman': KalmanFilter, 'last_seen': frame_idx, 'detections': [], 'labels': []}
+        track_id_counter = 0
         
-        Returns:
-            Interpolated frame with corrected detections
-        """
-        # Create a copy of current frame to modify
-        interpolated_frame = {
-            "boxes": current_frame["boxes"].copy(),
-            "scores": current_frame["scores"].copy(),
-            "labels": current_frame["labels"].copy()
-        }
+        # Process each frame
+        processed_frames = []
         
-        # 1. Remove isolated objects (appear only in current frame)
-        objects_to_remove = self.find_isolated_objects(
-            current_frame, before_frames, after_frames, iou_threshold
-        )
-        
-        # Apply removal (remove in reverse order to maintain indices)
-        for obj_idx in sorted(objects_to_remove, reverse=True):
-            removed_label = interpolated_frame["labels"][obj_idx]
-            removed_score = interpolated_frame["scores"][obj_idx]
-            del interpolated_frame["boxes"][obj_idx]
-            del interpolated_frame["scores"][obj_idx]
-            del interpolated_frame["labels"][obj_idx]
-            print(f"  -> Removed isolated object: label {removed_label}, score {removed_score:.3f}")
-        
-        # 2. Find missing objects (appear in before AND after frames but not in current)
-        missing_objects = self.find_missing_objects(
-            current_frame, before_frames, after_frames, iou_threshold
-        )
-        
-        # 3. Find objects with wrong labels
-        label_corrections = self.find_label_corrections(
-            current_frame, before_frames, after_frames, iou_threshold
-        )
-        
-        # 4. Apply missing object interpolation
-        for missing_obj in missing_objects:
-            interpolated_frame["boxes"].append(missing_obj["box"])
-            interpolated_frame["scores"].append(missing_obj["score"])
-            interpolated_frame["labels"].append(missing_obj["label"])
-            print(f"  -> Added missing object: label {missing_obj['label']}, score {missing_obj['score']:.3f}")
-        
-        # 5. Apply label corrections (after removal, so indices might have changed)
-        for correction in label_corrections:
-            box_idx = correction["box_idx"]
-            # Skip if this object was removed
-            if box_idx < len(interpolated_frame["labels"]):
-                new_label = correction["new_label"]
-                old_label = interpolated_frame["labels"][box_idx]
-                interpolated_frame["labels"][box_idx] = new_label
-                print(f"  -> Corrected label: {old_label} → {new_label}")
-        
-        return interpolated_frame
-
-    def find_isolated_objects(self, current_frame, before_frames, after_frames, iou_threshold):
-        """Find objects that appear only in current frame and not in any temporal frames"""
-        isolated_objects = []
-        
-        for curr_idx, curr_box in enumerate(current_frame["boxes"]):
-            curr_label = current_frame["labels"][curr_idx]
+        for frame_idx, frame_detections in enumerate(frames):
+            current_detections = {
+                "boxes": [],
+                "scores": [],
+                "labels": []
+            }
             
-            # Check if this object has any temporal support
-            has_temporal_support = False
+            # Match current detections with existing tracks
+            matched_tracks = set()
+            new_detections = []
             
-            # Check before frames
-            for frame in before_frames:
-                for i, box in enumerate(frame["boxes"]):
-                    if (frame["labels"][i] == curr_label and 
-                        self.bb_intersection_over_union(curr_box, box) > iou_threshold):
-                        has_temporal_support = True
-                        break
-                if has_temporal_support:
-                    break
-            
-            # Check after frames (only if no support found in before frames)
-            if not has_temporal_support:
-                for frame in after_frames:
-                    for i, box in enumerate(frame["boxes"]):
-                        if (frame["labels"][i] == curr_label and 
-                            self.bb_intersection_over_union(curr_box, box) > iou_threshold):
-                            has_temporal_support = True
-                            break
-                    if has_temporal_support:
-                        break
-            
-            # If no temporal support found, mark for removal
-            if not has_temporal_support:
-                isolated_objects.append(curr_idx)
-        
-        return isolated_objects
-
-    def find_missing_objects(self, current_frame, before_frames, after_frames, iou_threshold):
-        """Find objects that appear in before AND after frames but missing in current frame"""
-        missing_objects = []
-        
-        # Collect all objects from before and after frames
-        temporal_objects = []
-        
-        # Add objects from before frames
-        for frame in before_frames:
-            for i, box in enumerate(frame["boxes"]):
-                temporal_objects.append({
-                    "box": box,
-                    "score": frame["scores"][i],
-                    "label": frame["labels"][i],
-                    "frame_type": "before"
-                })
-        
-        # Add objects from after frames
-        for frame in after_frames:
-            for i, box in enumerate(frame["boxes"]):
-                temporal_objects.append({
-                    "box": box,
-                    "score": frame["scores"][i],
-                    "label": frame["labels"][i],
-                    "frame_type": "after"
-                })
-        
-        # Group temporal objects by spatial proximity and label
-        object_groups = self.group_temporal_objects(temporal_objects, iou_threshold)
-        
-        # Find groups that have both before and after objects but no current match
-        for group in object_groups:
-            has_before = any(obj["frame_type"] == "before" for obj in group)
-            has_after = any(obj["frame_type"] == "after" for obj in group)
-            
-            if has_before and has_after:
-                # Check if this group has a match in current frame
-                group_center = self.calculate_group_center(group)
+            for i, (box, score, label) in enumerate(zip(
+                frame_detections["boxes"], 
+                frame_detections["scores"], 
+                frame_detections["labels"]
+            )):
+                best_match_id = None
+                best_iou = 0
                 
-                has_current_match = False
-                for current_box in current_frame["boxes"]:
-                    if self.bb_intersection_over_union(group_center["box"], current_box) > iou_threshold:
-                        has_current_match = True
-                        break
-                
-                if not has_current_match:
-                    # Interpolate the missing object
-                    interpolated_obj = self.interpolate_object(group)
-                    missing_objects.append(interpolated_obj)
-        
-        return missing_objects
-
-    def find_label_corrections(self, current_frame, before_frames, after_frames, iou_threshold):
-        """Find objects in current frame that have wrong labels compared to temporal context"""
-        label_corrections = []
-        
-        for curr_idx, curr_box in enumerate(current_frame["boxes"]):
-            curr_label = current_frame["labels"][curr_idx]
-            
-            # Find matching objects in temporal frames
-            temporal_labels = []
-            
-            # Check before frames
-            for frame in before_frames:
-                for i, box in enumerate(frame["boxes"]):
-                    if self.bb_intersection_over_union(curr_box, box) > iou_threshold:
-                        temporal_labels.append(frame["labels"][i])
-            
-            # Check after frames
-            for frame in after_frames:
-                for i, box in enumerate(frame["boxes"]):
-                    if self.bb_intersection_over_union(curr_box, box) > iou_threshold:
-                        temporal_labels.append(frame["labels"][i])
-            
-            # If we have temporal context, check for label consistency
-            if len(temporal_labels) >= 2:  # Need at least 2 temporal matches
-                # Find the most common label in temporal context
-                label_counts = Counter(temporal_labels)
-                most_common_label = label_counts.most_common(1)[0][0]
-                most_common_count = label_counts.most_common(1)[0][1]
-                
-                # If all temporal labels agree and differ from current label
-                if (most_common_count == len(temporal_labels) and 
-                    most_common_label != curr_label):
-                    label_corrections.append({
-                        "box_idx": curr_idx,
-                        "old_label": curr_label,
-                        "new_label": most_common_label,
-                        "confidence": most_common_count / len(temporal_labels)
-                    })
-        
-        return label_corrections
-
-    def group_temporal_objects(self, temporal_objects, iou_threshold):
-        """Group temporal objects that likely represent the same object across frames"""
-        groups = []
-        used_indices = set()
-        
-        for i, obj1 in enumerate(temporal_objects):
-            if i in used_indices:
-                continue
-                
-            # Start a new group
-            current_group = [obj1]
-            used_indices.add(i)
-            
-            # Find similar objects
-            for j, obj2 in enumerate(temporal_objects):
-                if j in used_indices or i == j:
-                    continue
+                # Find best matching track
+                for track_id, track_data in tracks.items():
+                    if track_data['last_seen'] < frame_idx - max_missing_frames:
+                        continue
+                        
+                    # Predict current position
+                    predicted_box = track_data['kalman'].predict()
+                    iou = self.bb_intersection_over_union(box, predicted_box)
                     
-                # Check if objects are similar (same label and overlapping)
-                if (obj1["label"] == obj2["label"] and 
-                    self.bb_intersection_over_union(obj1["box"], obj2["box"]) > iou_threshold):
-                    current_group.append(obj2)
-                    used_indices.add(j)
+                    if iou > iou_threshold and iou > best_iou:
+                        best_iou = iou
+                        best_match_id = track_id
+                
+                if best_match_id is not None:
+                    # Update existing track
+                    tracks[best_match_id]['kalman'].update(box)
+                    tracks[best_match_id]['last_seen'] = frame_idx
+                    tracks[best_match_id]['detections'].append(box)
+                    tracks[best_match_id]['labels'].append(label)
+                    tracks[best_match_id]['scores'].append(score)
+                    matched_tracks.add(best_match_id)
+                    
+                    # Get corrected label (most common label in track)
+                    corrected_label = Counter(tracks[best_match_id]['labels']).most_common(1)[0][0]
+                    
+                    current_detections["boxes"].append(box)
+                    current_detections["scores"].append(score)
+                    current_detections["labels"].append(corrected_label)
+                else:
+                    # New detection
+                    new_detections.append((box, score, label))
             
-            if len(current_group) > 1:  # Only keep groups with multiple objects
-                groups.append(current_group)
+            # Create new tracks for unmatched detections
+            for box, score, label in new_detections:
+                kf = KalmanFilter()
+                kf.init_state(box)
+                
+                tracks[track_id_counter] = {
+                    'kalman': kf,
+                    'last_seen': frame_idx,
+                    'detections': [box],
+                    'labels': [label],
+                    'scores': [score]
+                }
+                track_id_counter += 1
+                
+                current_detections["boxes"].append(box)
+                current_detections["scores"].append(score)
+                current_detections["labels"].append(label)
+            
+            # Add interpolated detections for missing tracks
+            for track_id, track_data in tracks.items():
+                if track_id not in matched_tracks and track_data['last_seen'] >= frame_idx - max_missing_frames:
+                    # Track is missing, use Kalman prediction for interpolation
+                    predicted_box = track_data['kalman'].predict()
+                    
+                    # Use most common label and average score
+                    corrected_label = Counter(track_data['labels']).most_common(1)[0][0]
+                    avg_score = np.mean(track_data['scores'][-5:])  # Average of last 5 scores
+                    
+                    current_detections["boxes"].append(predicted_box)
+                    current_detections["scores"].append(avg_score * 0.8)  # Reduce confidence for interpolated
+                    current_detections["labels"].append(corrected_label)
+            
+            processed_frames.append(current_detections)
         
-        return groups
-
-    def calculate_group_center(self, group):
-        """Calculate the center position and average properties of a group"""
-        boxes = [obj["box"] for obj in group]
-        scores = [obj["score"] for obj in group]
-        labels = [obj["label"] for obj in group]
+        # Second pass: Remove spurious detections (tracks with too few detections)
+        valid_track_ids = set()
+        for track_id, track_data in tracks.items():
+            if len(track_data['detections']) >= min_detection_frames:
+                valid_track_ids.add(track_id)
         
-        # Calculate average box coordinates
-        avg_box = [
-            sum(box[0] for box in boxes) / len(boxes),  # x1
-            sum(box[1] for box in boxes) / len(boxes),  # y1
-            sum(box[2] for box in boxes) / len(boxes),  # x2
-            sum(box[3] for box in boxes) / len(boxes)   # y2
-        ]
+        # Final pass: Filter out spurious detections from processed frames
+        final_frames = []
+        track_frame_mapping = defaultdict(list)  # track_id: [frame_indices]
         
-        # Calculate average score
-        avg_score = sum(scores) / len(scores)
+        # Build mapping of which tracks appear in which frames
+        for frame_idx, frame_detections in enumerate(processed_frames):
+            frame_tracks = []
+            for box in frame_detections["boxes"]:
+                # Find which track this detection belongs to
+                best_track_id = None
+                best_iou = 0
+                
+                for track_id in valid_track_ids:
+                    if track_id in tracks:
+                        for track_box in tracks[track_id]['detections']:
+                            iou = self.bb_intersection_over_union(box, track_box)
+                            if iou > best_iou:
+                                best_iou = iou
+                                best_track_id = track_id
+                
+                if best_track_id is not None and best_iou > 0.3:
+                    frame_tracks.append(best_track_id)
+                    track_frame_mapping[best_track_id].append(frame_idx)
+                else:
+                    frame_tracks.append(None)  # Spurious detection
+            
+            # Filter current frame detections
+            filtered_detections = {
+                "boxes": [],
+                "scores": [],
+                "labels": []
+            }
+            
+            for i, track_id in enumerate(frame_tracks):
+                if track_id in valid_track_ids:
+                    filtered_detections["boxes"].append(frame_detections["boxes"][i])
+                    filtered_detections["scores"].append(frame_detections["scores"][i])
+                    filtered_detections["labels"].append(frame_detections["labels"][i])
+            
+            final_frames.append(filtered_detections)
         
-        # Use most common label
-        most_common_label = Counter(labels).most_common(1)[0][0]
-        
-        return {
-            "box": avg_box,
-            "score": avg_score,
-            "label": most_common_label
-        }
-
-    def interpolate_object(self, group):
-        """Interpolate a missing object from a group of temporal detections"""
-        # before_objects = [obj for obj in group if obj["frame_type"] == "before"]
-        # after_objects = [obj for obj in group if obj["frame_type"] == "after"]
-        
-        # Calculate interpolated position (simple average)
-        all_boxes = [obj["box"] for obj in group]
-        interpolated_box = [
-            sum(box[0] for box in all_boxes) / len(all_boxes),  # x1
-            sum(box[1] for box in all_boxes) / len(all_boxes),  # y1
-            sum(box[2] for box in all_boxes) / len(all_boxes),  # x2
-            sum(box[3] for box in all_boxes) / len(all_boxes)   # y2
-        ]
-        
-        # Calculate interpolated score (conservative estimate)
-        all_scores = [obj["score"] for obj in group]
-        interpolated_score = min(all_scores) * 0.8  # Reduce confidence for interpolated objects
-        
-        # Use most common label
-        all_labels = [obj["label"] for obj in group]
-        interpolated_label = Counter(all_labels).most_common(1)[0][0]
-        
-        return {
-            "box": interpolated_box,
-            "score": interpolated_score,
-            "label": interpolated_label
-        }
+        return final_frames
     
     def bb_intersection_over_union(self, boxA, boxB):
         xA = max(boxA[0], boxB[0])
