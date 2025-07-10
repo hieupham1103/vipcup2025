@@ -349,17 +349,8 @@ class DetectionModel(BaseDetectionModel):
         tracks = {}  # track_id: {'kalman': KalmanFilter, 'last_seen': frame_idx, 'detections': [], 'labels': []}
         track_id_counter = 0
         
-        # Process each frame
-        processed_frames = []
-        
+        # First pass: Build tracks and identify missing frames
         for frame_idx, frame_detections in enumerate(frames):
-            current_detections = {
-                "boxes": [],
-                "scores": [],
-                "labels": []
-            }
-            
-            # Match current detections with existing tracks
             matched_tracks = set()
             new_detections = []
             
@@ -391,14 +382,9 @@ class DetectionModel(BaseDetectionModel):
                     tracks[best_match_id]['detections'].append(box)
                     tracks[best_match_id]['labels'].append(label)
                     tracks[best_match_id]['scores'].append(score)
+                    tracks[best_match_id]['frame_indices'] = tracks[best_match_id].get('frame_indices', [])
+                    tracks[best_match_id]['frame_indices'].append(frame_idx)
                     matched_tracks.add(best_match_id)
-                    
-                    # Get corrected label (most common label in track)
-                    corrected_label = Counter(tracks[best_match_id]['labels']).most_common(1)[0][0]
-                    
-                    current_detections["boxes"].append(box)
-                    current_detections["scores"].append(score)
-                    current_detections["labels"].append(corrected_label)
                 else:
                     # New detection
                     new_detections.append((box, score, label))
@@ -413,31 +399,88 @@ class DetectionModel(BaseDetectionModel):
                     'last_seen': frame_idx,
                     'detections': [box],
                     'labels': [label],
-                    'scores': [score]
+                    'scores': [score],
+                    'frame_indices': [frame_idx]
                 }
                 track_id_counter += 1
-                
-                current_detections["boxes"].append(box)
-                current_detections["scores"].append(score)
-                current_detections["labels"].append(label)
+        
+        # Second pass: Process frames with smart interpolation
+        processed_frames = []
+        
+        for frame_idx, frame_detections in enumerate(frames):
+            current_detections = {
+                "boxes": [],
+                "scores": [],
+                "labels": []
+            }
             
-            # Add interpolated detections for missing tracks
-            for track_id, track_data in tracks.items():
-                if track_id not in matched_tracks and track_data['last_seen'] >= frame_idx - max_missing_frames:
-                    # Track is missing, use Kalman prediction for interpolation
-                    predicted_box = track_data['kalman'].predict()
+            # Add actual detections first
+            matched_tracks = set()
+            
+            for i, (box, score, label) in enumerate(zip(
+                frame_detections["boxes"], 
+                frame_detections["scores"], 
+                frame_detections["labels"]
+            )):
+                best_match_id = None
+                best_iou = 0
+                
+                # Find best matching track
+                for track_id, track_data in tracks.items():
+                    if frame_idx in track_data['frame_indices']:
+                        # This detection belongs to this track
+                        for track_box in track_data['detections']:
+                            iou = self.bb_intersection_over_union(box, track_box)
+                            if iou > best_iou:
+                                best_iou = iou
+                                best_match_id = track_id
+                
+                if best_match_id is not None:
+                    matched_tracks.add(best_match_id)
+                    # Get corrected label (most common label in track)
+                    corrected_label = Counter(tracks[best_match_id]['labels']).most_common(1)[0][0]
                     
-                    # Use most common label and average score
-                    corrected_label = Counter(track_data['labels']).most_common(1)[0][0]
-                    avg_score = np.mean(track_data['scores'][-5:])  # Average of last 5 scores
-                    
-                    current_detections["boxes"].append(predicted_box)
-                    current_detections["scores"].append(avg_score * 0.8)  # Reduce confidence for interpolated
+                    current_detections["boxes"].append(box)
+                    current_detections["scores"].append(score)
                     current_detections["labels"].append(corrected_label)
+                else:
+                    # Keep original detection if no track found
+                    current_detections["boxes"].append(box)
+                    current_detections["scores"].append(score)
+                    current_detections["labels"].append(label)
+            
+            # Add interpolated detections for missing tracks (only if they reappear later)
+            for track_id, track_data in tracks.items():
+                if track_id not in matched_tracks and self._should_interpolate(track_id, frame_idx, tracks, max_missing_frames):
+                    # Create a new Kalman filter for prediction from last known position
+                    kf_pred = KalmanFilter()
+                    last_detection_idx = max([idx for idx in track_data['frame_indices'] if idx < frame_idx], default=None)
+                    
+                    if last_detection_idx is not None:
+                        # Find the detection at last_detection_idx
+                        detection_idx = track_data['frame_indices'].index(last_detection_idx)
+                        last_box = track_data['detections'][detection_idx]
+                        
+                        # Initialize predictor and predict forward
+                        kf_pred.init_state(last_box)
+                        frames_to_predict = frame_idx - last_detection_idx
+                        
+                        # Predict forward
+                        predicted_box = last_box
+                        for _ in range(frames_to_predict):
+                            predicted_box = kf_pred.predict()
+                        
+                        # Use most common label and average score
+                        corrected_label = Counter(track_data['labels']).most_common(1)[0][0]
+                        avg_score = np.mean(track_data['scores'][-3:])  # Average of last 3 scores
+                        
+                        current_detections["boxes"].append(predicted_box)
+                        current_detections["scores"].append(avg_score * 0.7)  # Reduce confidence for interpolated
+                        current_detections["labels"].append(corrected_label)
             
             processed_frames.append(current_detections)
         
-        # Second pass: Remove spurious detections (tracks with too few detections)
+        # Third pass: Remove spurious detections (tracks with too few detections)
         valid_track_ids = set()
         for track_id, track_data in tracks.items():
             if len(track_data['detections']) >= min_detection_frames:
@@ -445,46 +488,62 @@ class DetectionModel(BaseDetectionModel):
         
         # Final pass: Filter out spurious detections from processed frames
         final_frames = []
-        track_frame_mapping = defaultdict(list)  # track_id: [frame_indices]
         
-        # Build mapping of which tracks appear in which frames
         for frame_idx, frame_detections in enumerate(processed_frames):
-            frame_tracks = []
-            for box in frame_detections["boxes"]:
-                # Find which track this detection belongs to
-                best_track_id = None
-                best_iou = 0
-                
-                for track_id in valid_track_ids:
-                    if track_id in tracks:
-                        for track_box in tracks[track_id]['detections']:
-                            iou = self.bb_intersection_over_union(box, track_box)
-                            if iou > best_iou:
-                                best_iou = iou
-                                best_track_id = track_id
-                
-                if best_track_id is not None and best_iou > 0.3:
-                    frame_tracks.append(best_track_id)
-                    track_frame_mapping[best_track_id].append(frame_idx)
-                else:
-                    frame_tracks.append(None)  # Spurious detection
-            
-            # Filter current frame detections
             filtered_detections = {
                 "boxes": [],
                 "scores": [],
                 "labels": []
             }
             
-            for i, track_id in enumerate(frame_tracks):
-                if track_id in valid_track_ids:
-                    filtered_detections["boxes"].append(frame_detections["boxes"][i])
-                    filtered_detections["scores"].append(frame_detections["scores"][i])
-                    filtered_detections["labels"].append(frame_detections["labels"][i])
+            for i, (box, score, label) in enumerate(zip(
+                frame_detections["boxes"], 
+                frame_detections["scores"], 
+                frame_detections["labels"]
+            )):
+                # Check if this detection belongs to a valid track
+                belongs_to_valid_track = False
+                
+                for track_id in valid_track_ids:
+                    if track_id in tracks:
+                        for track_box in tracks[track_id]['detections']:
+                            iou = self.bb_intersection_over_union(box, track_box)
+                            if iou > 0.3:
+                                belongs_to_valid_track = True
+                                break
+                    if belongs_to_valid_track:
+                        break
+                
+                if belongs_to_valid_track:
+                    filtered_detections["boxes"].append(box)
+                    filtered_detections["scores"].append(score)
+                    filtered_detections["labels"].append(label)
             
             final_frames.append(filtered_detections)
         
         return final_frames
+    
+    def _should_interpolate(self, track_id, current_frame_idx, tracks, max_missing_frames):
+        """Check if we should interpolate for a missing track by looking at future frames"""
+        track_data = tracks[track_id]
+        frame_indices = track_data['frame_indices']
+        
+        # Check if track was seen recently enough
+        last_seen = max([idx for idx in frame_indices if idx < current_frame_idx], default=-1)
+        if last_seen == -1 or current_frame_idx - last_seen > max_missing_frames:
+            return False
+        
+        # Check if track reappears in future frames (within max_missing_frames)
+        future_appearances = [idx for idx in frame_indices if idx > current_frame_idx]
+        if not future_appearances:
+            return False
+        
+        # Check if the next appearance is within reasonable distance
+        next_appearance = min(future_appearances)
+        if next_appearance - current_frame_idx <= max_missing_frames:
+            return True
+        
+        return False
     
     def bb_intersection_over_union(self, boxA, boxB):
         xA = max(boxA[0], boxB[0])
