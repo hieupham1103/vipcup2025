@@ -76,8 +76,22 @@ def visualize_tracking_video(
                 track_id = int(det["track_id"])
                 label = int(det["label"])
                 score = det["score"]
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(frame, f"ID: {track_id} {label} {score:.2f}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                motion = det.get("motion", None)
+                
+                if motion == "approaching":
+                    color = (0, 0, 255)
+                elif motion == "receding":
+                    color = (255, 0, 0)
+                else:
+                    color = (0, 255, 0)
+                
+                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                
+                text = f"ID: {track_id} {label} {score:.2f}"
+                if motion:
+                    text += f" [{motion}]"
+                
+                cv2.putText(frame, text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
         writer.write(frame)
     cap.release()
     writer.release()
