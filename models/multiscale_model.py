@@ -1,8 +1,6 @@
 import cv2
 import numpy as np
 import ultralytics
-from ultralytics.trackers.byte_tracker import BYTETracker
-from ultralytics.cfg import get_cfg
 import torch
 from torchvision.ops import nms as torch_nms
 from ensemble_boxes import *
@@ -24,7 +22,10 @@ class DetectionModel(BaseDetectionModel):
         self.device = device
     
     def _load_model(self, model_path):
-        self.model = ultralytics.YOLO(model_path)
+        if "deyolo" in model_path:
+            self.model = ultralytics.YOLO(model_path)
+        else:
+            self.model = ultralytics.YOLO(model_path)
         return self.model
     
     def image_detect(self,
@@ -53,16 +54,17 @@ class DetectionModel(BaseDetectionModel):
             "scores": [],
             "labels": []
         }
-        
-        h, w = image.shape[:2]
+        # print(type(image))
+        if isinstance(image, np.ndarray):
+            image = [image]
+        h, w = image[0].shape[:2]
         
         batch_images = []
         batch_metadata = []
         total_weights = []
         for scale in scales:
             new_h, new_w = int(h * scale), int(w * scale)
-            scaled_image = cv2.resize(image, (new_w, new_h))
-            
+            scaled_image = [cv2.resize(img, (new_w, new_h)) for img in image]
             # ảnh gốc
             batch_images.append(scaled_image)
             batch_metadata.append({
@@ -88,7 +90,9 @@ class DetectionModel(BaseDetectionModel):
             # print(f"Crop size: ({crop_w}, {crop_h}), positions: {crop_positions}")
             
             for idx, (x_offset, y_offset) in enumerate(crop_positions):
-                crop = scaled_image[y_offset:y_offset + crop_h, x_offset:x_offset + crop_w]
+                crop = []
+                for img in scaled_image:
+                    crop.append(img[y_offset:y_offset + crop_h, x_offset:x_offset + crop_w])
                 batch_images.append(crop)
                 batch_metadata.append({
                     'scale': scale,
@@ -98,18 +102,44 @@ class DetectionModel(BaseDetectionModel):
                 })
                 
         # 3. Run batch inference
-        batch_results = self.model.predict(
-            batch_images,
-            conf=conf_threshold,
-            iou=iou_threshold,
-            verbose=False,
-            device=self.device,
-            stream=True,
-        )
+        if len(batch_images[0]) == 1:
+            batch_images = [img[0] for img in batch_images]
+            batch_results = self.model.predict(
+                batch_images,
+                conf=conf_threshold,
+                iou=iou_threshold,
+                verbose=False,
+                device=self.device,
+                stream=True
+            )
+            # batch_results = []
+            # for image in batch_images:
+            #     result = self.model.predict(
+            #         image[0],
+            #         conf=conf_threshold,
+            #         iou=iou_threshold,
+            #         verbose=False,
+            #         device=self.device,
+            #         # stream=True
+            #     )
+            #     batch_results.append(result[0])
+        else:
+            batch_results = []
+            for image in batch_images:
+                result = self.model.predict(
+                    image,
+                    conf=conf_threshold,
+                    iou=iou_threshold,
+                    verbose=False,
+                    device=self.device,
+                    # stream=True
+                )
+                batch_results.append(result[0])
         
         
         detections_per_view = []
         
+        # print(batch_images[0][1].shape, batch_images[0][1].shape)
         for idx, (result, metadata) in enumerate(zip(batch_results, batch_metadata)):
             # print(f"Processing result {idx + 1}/{len(batch_metadata)}")
             # if result.boxes is None:
@@ -216,26 +246,43 @@ class DetectionModel(BaseDetectionModel):
             iou_threshold = self.iou_threshold
             
         frames = []
-        
-        cap = cv2.VideoCapture(video_path)
-        while cap.isOpened():
-            ret, frame = cap.read()
-            if not ret:
-                break
-            
-            det = self.image_detect(frame,
-                                    scales=scales,
-                                    crop_ratio=crop_ratio,
-                                    weights=weights,
-                                    conf_threshold=conf_threshold,
-                                    iou_threshold=iou_threshold
-                                )
-            
-            frames.append(det)
-            # if len(frames) >= 30:
-            #     break    
-        cap.release()
-        
+        if isinstance(video_path, str):
+            cap = cv2.VideoCapture(video_path)
+            while cap.isOpened():
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                det = self.image_detect(frame,
+                                        scales=scales,
+                                        crop_ratio=crop_ratio,
+                                        weights=weights,
+                                        conf_threshold=conf_threshold,
+                                        iou_threshold=iou_threshold
+                                    )
+                
+                frames.append(det)
+            cap.release()
+        elif isinstance(video_path, list):
+            cap_1 = cv2.VideoCapture(video_path[0])
+            cap_2 = cv2.VideoCapture(video_path[1])
+            while cap_1.isOpened() or cap_2.isOpened():
+                ret, frame_1 = cap_1.read()
+                ret2, frame_2 = cap_2.read()
+                if not ret and not ret2:
+                    break
+                det = self.image_detect([frame_1, frame_2],
+                                        scales=scales,
+                                        crop_ratio=crop_ratio,
+                                        weights=weights,
+                                        conf_threshold=conf_threshold,
+                                        iou_threshold=iou_threshold
+                                    )
+                frames.append(det)
+            cap_1.release()
+            cap_2.release()
+        else:
+            raise ValueError("video_path must be a string or a list of strings")
         before_frame = []
         after_frame = []
         if len(frames) > video_buffer_size:
@@ -243,31 +290,31 @@ class DetectionModel(BaseDetectionModel):
         else:
             after_frame = frames[1:]
         
-        final_frames = []
+        # final_frames = []
         
-        for idx, frame in enumerate(frames):
-            # print(f"Processing frame {idx + 1}/{len(frames)}")
+        # for idx, frame in enumerate(frames):
+        #     print(f"Processing frame {idx + 1}/{len(frames)}")
             
-            # Apply interpolation postprocessing
-            interpolated_frame = self.interpolate_frame(
-                current_frame=frame,
-                before_frames=before_frame.copy(),
-                after_frames=after_frame.copy(),
-                iou_threshold=self.iou_threshold
-            )
+        #     # Apply interpolation postprocessing
+        #     interpolated_frame = self.interpolate_frame(
+        #         current_frame=frame,
+        #         before_frames=before_frame.copy(),
+        #         after_frames=after_frame.copy(),
+        #         iou_threshold=self.iou_threshold
+        #     )
             
-            final_frames.append(interpolated_frame)
+        #     final_frames.append(interpolated_frame)
                           
-            # Update before_frame and after_frame buffers
-            if len(before_frame) >= video_buffer_size:
-                before_frame.pop(0)
-            if len(after_frame) >= video_buffer_size:
-                after_frame.pop(0)
-            before_frame.append(frame)
-            if idx + video_buffer_size < len(frames):
-                after_frame.append(frames[idx + video_buffer_size])
+        #     # Update before_frame and after_frame buffers
+        #     if len(before_frame) >= video_buffer_size:
+        #         before_frame.pop(0)
+        #     if len(after_frame) >= video_buffer_size:
+        #         after_frame.pop(0)
+        #     before_frame.append(frame)
+        #     if idx + video_buffer_size < len(frames):
+        #         after_frame.append(frames[idx + video_buffer_size])
         
-        return final_frames
+        return frames
 
     def interpolate_frame(self, current_frame, before_frames, after_frames, iou_threshold=0.5):
         """
@@ -301,7 +348,7 @@ class DetectionModel(BaseDetectionModel):
             del interpolated_frame["boxes"][obj_idx]
             del interpolated_frame["scores"][obj_idx]
             del interpolated_frame["labels"][obj_idx]
-            # print(f"  -> Removed isolated object: label {removed_label}, score {removed_score:.3f}")
+            print(f"  -> Removed isolated object: label {removed_label}, score {removed_score:.3f}")
         
         # 2. Find missing objects (appear in before AND after frames but not in current)
         missing_objects = self.find_missing_objects(
@@ -318,7 +365,7 @@ class DetectionModel(BaseDetectionModel):
             interpolated_frame["boxes"].append(missing_obj["box"])
             interpolated_frame["scores"].append(missing_obj["score"])
             interpolated_frame["labels"].append(missing_obj["label"])
-            # print(f"  -> Added missing object: label {missing_obj['label']}, score {missing_obj['score']:.3f}")
+            print(f"  -> Added missing object: label {missing_obj['label']}, score {missing_obj['score']:.3f}")
         
         # 5. Apply label corrections (after removal, so indices might have changed)
         for correction in label_corrections:
@@ -328,7 +375,7 @@ class DetectionModel(BaseDetectionModel):
                 new_label = correction["new_label"]
                 old_label = interpolated_frame["labels"][box_idx]
                 interpolated_frame["labels"][box_idx] = new_label
-                # print(f"  -> Corrected label: {old_label} → {new_label}")
+                print(f"  -> Corrected label: {old_label} → {new_label}")
         
         return interpolated_frame
 

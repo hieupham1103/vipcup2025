@@ -1,8 +1,6 @@
 import cv2
 import numpy as np
 import ultralytics
-from ultralytics.trackers.byte_tracker import BYTETracker
-from ultralytics.cfg import get_cfg
 import torch
 
 class DetectionModel:
