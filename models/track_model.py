@@ -43,9 +43,65 @@ class TrackingModel:
         
         # Track lost objects from previous frame
         self.prev_active_tracks = set()
+        # Store last known positions for each track
+        self.track_positions = {}
     
     def _calculate_bbox_area(self, bbox):
         return (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+    
+    def _calculate_iou(self, bbox1, bbox2):
+        """Calculate IoU between two bboxes"""
+        x1 = max(bbox1[0], bbox2[0])
+        y1 = max(bbox1[1], bbox2[1])
+        x2 = min(bbox1[2], bbox2[2])
+        y2 = min(bbox1[3], bbox2[3])
+        
+        if x2 <= x1 or y2 <= y1:
+            return 0.0
+        
+        intersection = (x2 - x1) * (y2 - y1)
+        area1 = (bbox1[2] - bbox1[0]) * (bbox1[3] - bbox1[1])
+        area2 = (bbox2[2] - bbox2[0]) * (bbox2[3] - bbox2[1])  # Fixed: bbox2[2] instead of bbox2
+        union = area1 + area2 - intersection
+        
+        return intersection / (union + 1e-6)
+    
+    def _is_valid_recovery(self, recovered_bbox, track_id, active_tracks):
+        """Check if recovered track is valid and not overlapping with active tracks"""
+        
+        # Check if bbox is reasonable size
+        width = recovered_bbox[2] - recovered_bbox[0]
+        height = recovered_bbox[3] - recovered_bbox[1]
+        
+        if width <= 5 or height <= 5:  # Too small
+            return False
+        
+        if width > 500 or height > 500:  # Too large (adjust based on your data)
+            return False
+        
+        # Check for overlap with active tracks (avoid duplicates)
+        for active_track in active_tracks:
+            iou = self._calculate_iou(recovered_bbox, active_track['bbox'])
+            if iou > 0.3:  # High overlap with existing track
+                return False
+        
+        # Check if track has moved too far from last known position
+        if track_id in self.track_positions:
+            last_bbox = self.track_positions[track_id]
+            
+            # Calculate center distance
+            last_center = [(last_bbox[0] + last_bbox[2])/2, (last_bbox[1] + last_bbox[3])/2]
+            current_center = [(recovered_bbox[0] + recovered_bbox[2])/2, (recovered_bbox[1] + recovered_bbox[3])/2]
+            
+            distance = np.sqrt((last_center[0] - current_center[0])**2 + 
+                             (last_center[1] - current_center[1])**2)
+            
+            # Check if moved too far (adjust threshold based on your data)
+            max_movement = max(width, height) * 2  # Allow movement up to 2x bbox size
+            if distance > max_movement:
+                return False
+        
+        return True
     
     def _predict_motion(self, track_id, current_bbox):
         current_area = self._calculate_bbox_area(current_bbox)
@@ -152,6 +208,9 @@ class TrackingModel:
                 tracked_frames.append(result)
                 active_tracks.append({'id': int(track_id), 'bbox': bbox})
                 current_active_tracks.add(int(track_id))
+                
+                # Update track positions
+                self.track_positions[int(track_id)] = bbox
             
             # Use compensation tracker for lost objects
             if self.use_compensation and frame_idx > 0:
@@ -159,24 +218,30 @@ class TrackingModel:
                 lost_tracks = []
                 lost_track_ids = self.prev_active_tracks - current_active_tracks
                 
-                # For simplicity, we'll use last known positions for lost tracks
-                # In a more sophisticated implementation, you'd store the last bbox per track
+                # For lost tracks, use stored positions
                 for lost_id in lost_track_ids:
-                    # Find last known bbox for this track (from previous frames)
-                    last_bbox = None
-                    for prev_result in reversed(tracked_frames):
-                        if prev_result["track_id"] == lost_id:
-                            last_bbox = prev_result["bbox"]
-                            break
-                    
-                    if last_bbox:
+                    if lost_id in self.track_positions:
+                        last_bbox = self.track_positions[lost_id]
                         lost_tracks.append({'id': lost_id, 'bbox': last_bbox})
                 
                 # Get recovered tracks
                 recovered_tracks = self.comp_tracker.step(lost_tracks, active_tracks, frame)
-                print(f"Frame {frame_idx}: Active: {len(active_tracks)}, Lost: {len(lost_tracks)}, Recovered: {len(recovered_tracks)}")
-                # Add recovered tracks to results
+                
+                # Validate and filter recovered tracks
+                valid_recovered = []
                 for recovered in recovered_tracks:
+                    if self._is_valid_recovery(recovered['bbox'], recovered['id'], active_tracks):
+                        valid_recovered.append(recovered)
+                    else:
+                        # Remove invalid tracks from compensation tracker
+                        if recovered['id'] in self.comp_tracker.trackers:
+                            del self.comp_tracker.trackers[recovered['id']]
+                
+                print(f"Frame {frame_idx}: Active: {len(active_tracks)}, Lost: {len(lost_tracks)}, "
+                      f"Recovered: {len(recovered_tracks)}, Valid: {len(valid_recovered)}")
+                
+                # Add valid recovered tracks to results
+                for recovered in valid_recovered:
                     motion_type = self._predict_motion(recovered['id'], recovered['bbox'])
                     
                     result = {
@@ -193,6 +258,9 @@ class TrackingModel:
                     
                     tracked_frames.append(result)
                     current_active_tracks.add(recovered['id'])
+                    
+                    # Update track positions for valid recoveries
+                    self.track_positions[recovered['id']] = recovered['bbox']
             
             self.prev_active_tracks = current_active_tracks
             frame_idx += 1

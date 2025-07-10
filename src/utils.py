@@ -44,7 +44,8 @@ def visualize_detection_image(
     check_output_folder(output_path)
     image = cv2.imread(image_path)
     for box, score, label in zip(detection_results["boxes"], detection_results["scores"], detection_results["labels"]):
-        box = box[0].tolist()
+        if isinstance(box, np.ndarray):
+            box = box.tolist()
         label = int(label.item())
         score = score.item()
         x1, y1, x2, y2 = map(int, box)
