@@ -14,7 +14,7 @@ class TrackingModel:
                  config_path='configs/bytetrack.yml',
                  fps = 25,
                  motion_history_length=3,
-                 approach_threshold=1.1,
+                 approach_threshold=1.05,
                  use_compensation=True,
                  compensation_config=None
                  ):

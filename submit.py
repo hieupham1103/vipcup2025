@@ -264,16 +264,16 @@ def main():
     args = parser.parse_args()
     
     # Generate IR submission
-    print(f"Generating IR submission with conf={args.ir_conf}, iou={args.ir_iou}...")
-    ir_generator = SubmissionGenerator(
-        model_path=args.ir_model,
-        modality='IR',
-        team_name=args.team_name,
-        conf_threshold=args.ir_conf,
-        iou_threshold=args.ir_iou
-    )
-    ir_output = os.path.join(args.output_dir, f"{args.team_name}_IR_submission.csv")
-    ir_generator.process_dataset(args.data_folder, ir_output)
+    # print(f"Generating IR submission with conf={args.ir_conf}, iou={args.ir_iou}...")
+    # ir_generator = SubmissionGenerator(
+    #     model_path=args.ir_model,
+    #     modality='IR',
+    #     team_name=args.team_name,
+    #     conf_threshold=args.ir_conf,
+    #     iou_threshold=args.ir_iou
+    # )
+    # ir_output = os.path.join(args.output_dir, f"{args.team_name}_IR_submission.csv")
+    # ir_generator.process_dataset(args.data_folder, ir_output)
     
     # Generate RGB submission
     print(f"Generating RGB submission with conf={args.rgb_conf}, iou={args.rgb_iou}...")

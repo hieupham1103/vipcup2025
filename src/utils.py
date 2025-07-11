@@ -101,3 +101,4 @@ def visualize_tracking_video(
 def check_output_folder(file_path: str):
     folder_path = os.path.dirname(file_path)
     os.makedirs(folder_path, exist_ok=True)
+    
