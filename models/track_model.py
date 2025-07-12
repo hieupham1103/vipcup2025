@@ -123,7 +123,7 @@ class TrackingModel:
                 ratio_count += 1
         
         if ratio_count == 0:
-            return None
+            return "receding"
         
         avg_ratio = ratio_sum / ratio_count
         
@@ -131,7 +131,7 @@ class TrackingModel:
             return "approaching"
         return "receding"
     
-    def video_track(self, video_path: str,    
+    def video_track(self, video_path,    
                 conf_threshold=None,
                 iou_threshold=None,
                 return_det = False) -> list:
@@ -141,7 +141,8 @@ class TrackingModel:
                                                        iou_threshold=iou_threshold
                                                        )
         tracked_frames = []
-        
+        if isinstance(video_path, list):
+            video_path = video_path[0]
         cap = cv2.VideoCapture(video_path)
         
         # Set compensation tracker image size

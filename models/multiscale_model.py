@@ -74,10 +74,7 @@ class DetectionModel(BaseDetectionModel):
         self.device = device
     
     def _load_model(self, model_path):
-        if "deyolo" in model_path:
-            self.model = ultralytics.YOLO(model_path)
-        else:
-            self.model = ultralytics.YOLO(model_path)
+        self.model = ultralytics.YOLO(model_path)
         return self.model
     
     def image_detect(self,
@@ -153,41 +150,22 @@ class DetectionModel(BaseDetectionModel):
                     'original_size': (w, h)
                 })
                 
-        # 3. Run batch inference
+        # 3. Run batch inference\
         if len(batch_images[0]) == 1:
             batch_images = [img[0] for img in batch_images]
-            batch_results = self.model.predict(
-                batch_images,
-                conf=conf_threshold,
-                iou=iou_threshold,
-                verbose=False,
-                device=self.device,
-                stream=True
-            )
-            # batch_results = []
-            # for image in batch_images:
-            #     result = self.model.predict(
-            #         image[0],
-            #         conf=conf_threshold,
-            #         iou=iou_threshold,
-            #         verbose=False,
-            #         device=self.device,
-            #         # stream=True
-            #     )
-            #     batch_results.append(result[0])
         else:
-            batch_results = []
-            for image in batch_images:
-                result = self.model.predict(
-                    image,
-                    conf=conf_threshold,
-                    iou=iou_threshold,
-                    verbose=False,
-                    device=self.device,
-                    # stream=True
-                )
-                batch_results.append(result[0])
-        
+            RGB_batch_images = [img[0] for img in batch_images]
+            IR_batch_images = [img[1] for img in batch_images]
+            batch_images = [RGB_batch_images, IR_batch_images]
+            
+        batch_results = self.model.predict(
+            batch_images,
+            conf=conf_threshold,
+            iou=iou_threshold,
+            verbose=False,
+            device=self.device,
+            stream=True
+        )
         
         detections_per_view = []
         
@@ -297,7 +275,7 @@ class DetectionModel(BaseDetectionModel):
             conf_threshold = self.conf_threshold
         if iou_threshold is None:
             iou_threshold = self.iou_threshold
-            
+        
         frames = []
         if isinstance(video_path, str):
             cap = cv2.VideoCapture(video_path)

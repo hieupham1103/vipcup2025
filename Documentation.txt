@@ -1,0 +1,15 @@
+How to setup the enviroment
+    install all dependency and package in requirements.txt
+How to run the code
+    set --data_folder with your test data folder, and --output_dir with your output folder
+    RGB:
+        python "inference_detection&tracking.py" --modality RGB --data_folder "data/Test_detection&tracking/RGB" --model checkpoints/rgb.pt --team_name "V-Linsight" --output_dir submissions --conf 0.2 --iou 0.1
+    IR:
+        python "inference_detection&tracking.py" --modality IR --data_folder "data/Test_detection&tracking/IR" --model checkpoints/ir.pt --team_name "V-Linsight" --output_dir submissions --conf 0.2 --iou 0.1
+
+
+Use yolov8 with multiscale module to combine the detection results of the model from different perspectives. For tracking, use bytetrack and Compensation Tracker.
+
+CPU: Ultra 7 155H
+GPU: RTX 4050 Mobile 6GB Vram
+RAM: 32GB DDR5
