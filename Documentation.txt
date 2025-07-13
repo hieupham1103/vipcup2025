@@ -1,7 +1,7 @@
 How to setup the enviroment
     install all dependency and package in requirements.txt
 How to run the code
-    set --data_folder with your test data folder, and --output_dir with your output folder
+    set --data_folder with your test data folder, and --output_dir with your output folder, add --visualize tag to make a visualize videos and images
     RGB:
         python "inference_detection&tracking.py" --modality RGB --data_folder "data/Test_detection&tracking/RGB" --model checkpoints/rgb.pt --team_name "V-Linsight" --output_dir submissions --conf 0.2 --iou 0.1
     IR:

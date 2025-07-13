@@ -109,7 +109,7 @@ class TrackingModel:
         history.append(current_bbox)
         
         if len(history) < 2:
-            return None
+            return "receding"
         
         ratio_sum = 0.0
         ratio_count = 0
